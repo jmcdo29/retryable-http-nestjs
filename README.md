@@ -9,67 +9,76 @@
   
   <p align="center">A progressive <a href="http://nodejs.org" target="blank">Node.js</a> framework for building efficient and scalable server-side applications, heavily inspired by <a href="https://angular.io" target="blank">Angular</a>.</p>
     <p align="center">
-<a href="https://www.npmjs.com/~nestjscore"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore"><img src="https://img.shields.io/npm/dm/@nestjs/core.svg" alt="NPM Downloads" /></a>
-<a href="https://travis-ci.org/nestjs/nest"><img src="https://api.travis-ci.org/nestjs/nest.svg?branch=master" alt="Travis" /></a>
-<a href="https://travis-ci.org/nestjs/nest"><img src="https://img.shields.io/travis/nestjs/nest/master.svg?label=linux" alt="Linux" /></a>
-<a href="https://coveralls.io/github/nestjs/nest?branch=master"><img src="https://coveralls.io/repos/github/nestjs/nest/badge.svg?branch=master#5" alt="Coverage" /></a>
-<a href="https://gitter.im/nestjs/nestjs?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=body_badge"><img src="https://badges.gitter.im/nestjs/nestjs.svg" alt="Gitter" /></a>
-<a href="https://opencollective.com/nest#backer"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec"><img src="https://img.shields.io/badge/Donate-PayPal-dc3d53.svg"/></a>
-  <a href="https://twitter.com/nestframework"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow"></a>
 </p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+
+# Retryable-HttpService-NestJS
 
 ## Description
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+By default, if [Axios](https://github.com/axios/axiosgi) receives any HTTP status code that is not in the 200-300 range, it will throw an error and reject the call (via `Promise.reject`). NestJS uses Axios as the underlying HttpService for the HttpModule, which can be injected into any service class, but wraps the response in an Observable. With the response being an RxJS Observable, a lot of really cool things can happen, including response mapping using `map`, internal error handling with `catchError` and even spying on the response with `tap`. However, this all only happen is Axios `resolves` the promise instead of rejecting it (i.e. if the return code is 2xx). This is a problem for any sort retrying you may want to try to do, so here's how it can be fixed.
 
-## Installation
+## Configuration
 
-```bash
-$ npm install
+Either in your `HttpModule` import in in the `HttpService` call, you can pass configuration options to Axios for it to know how to react. I decided to do this at the service level, but it is possible to do in the module's import using `HttpModule.register()` or `HttpModule.registerAsync()`. Looking at the Axios config options, there is one calls `validateStatus` which is usually a function that takes in a number and returns a boolean, to determine what to do with the status code. This is where Axios by default determines that a `status >= 200 && status < 300` is an acceptable response and resolves the promise otherwise rejects. We can either add in our own functionality to determine if the status is a 404 then reject, or if it is a 400 resolve, or we can just set the function directly to `null` or `undefined` and let the function always return `true` (according to the Axios config docs).
+
+Phew, now that we have the `validateStatus` returning true, we always get an observable response, and we can start retrying our Http calls that fail. To do this, we'll need to make use of the `mergeMap` RxJS operator, to determine what kind of operation to take. 
+
+```ts
+@Injectable()
+export class MyService {
+
+  constructor(private readonly httpService: HttpService) {}
+
+  getBadHttpCall(): Observable<any> {
+    return this.httpService.get('https://www.google.com/item/character', { validateStatus: null }).pipe(
+      mergeMap(val => {
+        if (val.status >= 400) {
+          return throwError(`Received status ${val.status} from HTTP call`);
+        }
+        return of (val.data);
+      }),
+      retry(2),
+      catchError(err => {
+        return of(err);
+      }),
+    );
+  }
+}
 ```
 
-## Running the app
+The above class uses `mergeMap` to check the response sent back from the HTTP call, and if the status code is 400 or greater, we decide to throw and error with the RxJs `throwError` function that allows the `retry` function to get called and fire up to the max number of times we decide. If the HTTP call returns a valid response (either a redirect or a success) we return an observable of the data sent back. This allows us to get rid of the type `Observable<AxiosResponse<any>>` and just have `Observable<any>` which is a little bit more manageable. Lastly, if we do surpass the max number of calls for `retry`, the `catchError` operator will catch the error and return the error thrown as a message to the end client (or the next function in the stack to subscribe to the observable).
 
-```bash
-# development
-$ npm run start
+## Testing
 
-# watch mode
-$ npm run start:dev
+So, testing this is a bit tricky, as the http function never gets "called" again, but the http request is made several times. After some Google-fu and understanding what's happening (I think), I was able to find an [answer on StackOverflow](https://stackoverflow.com/a/54083350/9576186) that led me to making an `Observer` that could emit whatever I needed it to in the correct order. With this, rather than testing how many times the http function was called, I was able to assert what the final response was, knowing what it should be based on the number of retries. 
 
-# production mode
-$ npm run start:prod
+```ts
+const mockRetryFunction = (times: number, failureValue: any, successValue: any) => {
+  let count = 0;
+  return Observable.create((observer: Observer<any>) => {
+    if (count++ < times) {
+      observer.next(failureValue);
+    } else {
+      observer.next(successValue);
+      observer.complete();
+    }
+  });
+};
 ```
 
-## Test
+And here is the magical function. You can save this little guy as a test helper and set the values as you expect in each test class, or just put it in each class and move on, your choice. From here, if you have a `times` of 0, you'll get a success immediately. If you have a `times` equal to your number of `retries` you'll get a `success` and if you have a `times` greater than your `retries` you will get a failure. Pretty nifty little tool to have around :).
 
-```bash
-# unit tests
-$ npm run test
+## Demo
 
-# e2e tests
-$ npm run test:e2e
+Steps to run the server and see how it works:
 
-# test coverage
-$ npm run test:cov
-```
+1) git clone
+2) npm i or yarn i
+3) npm run start:dev or yarn start:dev (or just start if you don't want hot reloading)
+4) curl http://localhost:3000/fail
+5) watch the output
+   1) run the curl multiple times to see the output change, based on the static variable in the controller
 
-## Support
+## End Notes
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://kamilmysliwiec.com)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-  Nest is [MIT licensed](LICENSE).
+This is a very basic example of how to be able to retry an http call with NestJS, and many parts of the example should probably have much better checking and error handling. Use this as a means to guide you, but **do not use this in production**.
