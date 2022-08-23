@@ -11,6 +11,12 @@
     <p align="center">
 </p>
 
+---
+
+<p align="center">This repository is archived as I do not plan to update it again. However, the code here should be valid and used as a tool to understand how to create retryable HTTP requests uisng NestJS's HttpService</p>
+
+---
+
 # Retryable-HttpService-NestJS
 
 ## Description
